@@ -1,0 +1,32 @@
+# Virtual Environment
+venv/
+.venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Data files (optional — remove if you want to include sample data)
+*.csv
+*.xlsx
+*.xls
+
+# Generated output
+final_timetable.csv
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE / Editor
+.vscode/
+.idea/
+*.code-workspace
+
+# Streamlit cache
+.streamlit/
+
+# Jupyter (if ever used)
+.ipynb_checkpoints/
