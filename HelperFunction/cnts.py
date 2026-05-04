@@ -1,13 +1,43 @@
+
+# HelperFunction/cnts.py
+# All hard constraints (is_valid_placement) + soft scoring (calculate_soft_score)
+# including the afternoon-spread bonus.
+
+# 1 slot = 10 minutes, 08:00–17:00 = 54 slots
+MAX_SLOTS = 60
+
+# Break slot boundaries
+# Tea break : 09:50–10:30 → slots 11–14
+# Prayer break: 13:30–14:30 → slots 33–38
+
+TEA_BREAK_START = 11
+TEA_BREAK_END = 15  # exclusive
+
+PRAYER_BREAK_START = 33
+PRAYER_BREAK_END = 39  # exclusive
+
+BLOCKED_SLOTS = frozenset(
+    list(range(TEA_BREAK_START, TEA_BREAK_END)) +
+    list(range(PRAYER_BREAK_START, PRAYER_BREAK_END))
+)
+
+# Afternoon = everything after prayer break ends (slot 39 → 14:30)
+AFTERNOON_START = PRAYER_BREAK_END
+
+
 class TimetableConstraints:
 
     # ==============================================================
     # HARD CONSTRAINTS
     # ==============================================================
-    @staticmethod
-    def is_valid_placement(chromosome, r_id, sects, inst_id,
-                           days, start, length):
 
-        d   = chromosome.data
+    @staticmethod
+    def is_valid_placement(chromosome, r_id, sects, inst_id, days, start, length):
+        """
+        Returns True only when ALL hard constraints pass.
+        """
+
+        d = chromosome.data
         end = start + length
 
         # 1. Boundary check
@@ -45,19 +75,22 @@ class TimetableConstraints:
         return True
 
     # ==============================================================
-    # SOFT CONSTRAINTS (UPGRADED)
+    # SOFT CONSTRAINTS
     # ==============================================================
+
     @staticmethod
     def calculate_soft_score(chromosome, data):
+        """
+        Soft fitness bonus:
+        +20 Afternoon spread
+        +10 Room capacity fit
+        -5 Over-capacity penalty
+        -5 Back-to-back lectures penalty
+        """
+
         score = 0.0
 
-        sections = chromosome.data['sections']
-        rooms    = chromosome.data['rooms']
-        subjects = chromosome.data['subjects']
-
-        # ----------------------------------------------------------
-        # 1. Afternoon spread bonus
-        # ----------------------------------------------------------
+        # ── Afternoon spread bonus ─────────────────────────────
         rooms_with_afternoon = 0
 
         for r_data in chromosome.data['rooms'].values():
@@ -66,28 +99,28 @@ class TimetableConstraints:
                     rooms_with_afternoon += 1
                     break
 
-        total_rooms = len(rooms)
+        total_rooms = len(chromosome.data['rooms'])
         if total_rooms:
             score += (rooms_with_afternoon / total_rooms) * 20
 
-        # ----------------------------------------------------------
-        # 2. Room capacity efficiency
-        # ----------------------------------------------------------
+        # ── Room capacity fit bonus ────────────────────────────
+        rooms = data['rooms']
+        subjects = data['subjects']
+        sections = chromosome.data['sections']
+
         for s_data in sections.values():
             for sub_id, details in s_data['details'].items():
-
-                r_id     = details[0]
+                r_id = details[0]
                 students = subjects[sub_id][7]
                 capacity = rooms[r_id][3]
 
                 if capacity >= students:
-                    score += (students / capacity) * 10
+                    utilisation = students / capacity
+                    score += utilisation * 10
                 else:
                     score -= 5
 
-        # ----------------------------------------------------------
-        # 3. Back-to-back penalty (improved)
-        # ----------------------------------------------------------
+        # ── Back-to-back lecture penalty ───────────────────────
         for s_id, s_data in sections.items():
             sessions_by_day = {}
 
@@ -105,63 +138,11 @@ class TimetableConstraints:
                 day_sessions.sort()
 
                 for i in range(len(day_sessions) - 1):
-                    start_a, end_a, type_a = day_sessions[i]
-                    start_b, end_b, type_b = day_sessions[i + 1]
+                    _, end_a, type_a = day_sessions[i]
+                    start_b, _, type_b = day_sessions[i + 1]
 
-                    # back-to-back lectures
                     if type_a == "lec" and type_b == "lec":
-                        if start_b - end_a <= 1:   # stricter (gap ≤ 1 slot)
+                        if start_b == end_a:
                             score -= 5
-
-        # ----------------------------------------------------------
-        # 4. GAP minimization (NEW ⭐ IMPORTANT)
-        # ----------------------------------------------------------
-        for s_id, s_data in sections.items():
-            daily_slots = {}
-
-            for sub_id, details in s_data['details'].items():
-                _, _, days, start, length = details
-                end = start + length
-
-                for day in days:
-                    daily_slots.setdefault(day, []).append((start, end))
-
-            for day, slots in daily_slots.items():
-                slots.sort()
-
-                for i in range(len(slots) - 1):
-                    _, end_a = slots[i]
-                    start_b, _ = slots[i + 1]
-
-                    gap = start_b - end_a
-                    if gap > 2:   # large gap penalty
-                        score -= gap * 0.5
-
-        # ----------------------------------------------------------
-        # 5. Teacher workload balance (NEW ⭐)
-        # ----------------------------------------------------------
-        teacher_load = {}
-
-        for s_data in sections.values():
-            for sub_id, details in s_data['details'].items():
-                inst_id = details[1]
-                if inst_id is not None:
-                    teacher_load[inst_id] = teacher_load.get(inst_id, 0) + 1
-
-        if teacher_load:
-            avg = sum(teacher_load.values()) / len(teacher_load)
-
-            for load in teacher_load.values():
-                score -= abs(load - avg) * 0.5
-
-        # ----------------------------------------------------------
-        # 6. Session completion reward (NEW ⭐ HARD-CONSTRAINT SUPPORT)
-        # ----------------------------------------------------------
-        for s_data in sections.values():
-            assigned = len(s_data['details'])
-            required = len(s_data.get('required', []))  # if you add later
-
-            if required:
-                score += (assigned / required) * 15
 
         return score
