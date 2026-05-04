@@ -3,16 +3,21 @@ import pandas as pd
 import json
 from datetime import datetime
 
-# ── GA engine (code.py lives alongside this file) ──────────────────────────
+# ── GA engine ──────────────────────────────────────────────────
 from HelperFunction.TimeTableCreater import (
     GIKI_ROOMS,
     GeneticAlgorithm,
     MAX_SLOTS,
     LEC_DAY_PATTERNS,
     LAB_DAY_PATTERNS,
+    LEC_LENGTH,    # 5  slots = 50 min
+    LAB_LENGTH,    # 18 slots = 180 min
+    SLOT_UNIT,     # 10 minutes per slot
+    VALID_LEC_STARTS,
+    VALID_LAB_STARTS,
     format_time,
 )
-from HelperFunction.export_grid import export_grid_pdf
+# from HelperFunction.export_grid import export_grid_pdf
 from HelperFunction.Validator   import validate_courses_df
 from HelperFunction.GridView    import render_grid_view
 
@@ -26,35 +31,38 @@ DAYS_LONG  = {
     "THU": "Thursday", "FRI": "Friday", "SAT": "Saturday",
 }
 
+DAY_START = 8 * 60   # 08:00 in minutes — matches TimeTableCreater.py
+
 # ═══════════════════════════════════════════════════════════════
-# TIME / SLOT HELPERS  (replaces old SLOTS / LAB_BLOCKS helpers)
+# TIME / SLOT HELPERS  — all use 10-min slot system
 # ═══════════════════════════════════════════════════════════════
 
 def _slot_to_time(slot_idx: int) -> str:
-    """Half-hour slot index → 'HH:MM' string."""
-    h = 8 + slot_idx // 2
-    m = "00" if slot_idx % 2 == 0 else "30"
-    return f"{h:02d}:{m}"
+    """10-minute slot index → 'HH:MM' string."""
+    total = DAY_START + slot_idx * SLOT_UNIT
+    return f"{total // 60:02d}:{total % 60:02d}"
+
+
+def _time_to_slot(time_str: str) -> int:
+    """'HH:MM' → 10-minute slot index from 08:00."""
+    h, m = map(int, time_str.split(":"))
+    return ((h * 60 + m) - DAY_START) // SLOT_UNIT
 
 
 def timeslot_str(days: list, start: int, length: int) -> str:
     """
-    Build a canonical timeslot key used throughout the app.
-    For lectures (multi-day) we store one key per day joined by '+':
-        "MON+WED+FRI-08:00"
-    For labs (single day):
-        "MON-08:00"
+    Build canonical timeslot key.
+    "MON+WED+FRI-08:00"  or  "MON-10:30"
     """
     day_part  = "+".join(DAYS_SHORT[d] for d in days)
-    time_part = _slot_to_time(start)
+    time_part = _slot_to_time(start)        # ✅ 10-min slots
     return f"{day_part}-{time_part}"
 
 
 def parse_timeslot(ts: str):
     """
     Inverse of timeslot_str.
-    Returns (day_shorts: list[str], time_str: str)
-    e.g. "MON+WED+FRI-08:00" → (["MON","WED","FRI"], "08:00")
+    "MON+WED+FRI-08:00" → (["MON","WED","FRI"], "08:00")
     """
     day_part, time_part = ts.rsplit("-", 1)
     return day_part.split("+"), time_part
@@ -63,22 +71,19 @@ def parse_timeslot(ts: str):
 def format_timeslot_display(ts: str, is_lab: bool) -> str:
     """Human-readable time range from a timeslot key."""
     _, time_part = ts.rsplit("-", 1)
-    # Reconstruct start slot index
-    h, m   = map(int, time_part.split(":"))
-    start  = (h - 8) * 2 + (1 if m == 30 else 0)
-    length = 6 if is_lab else 2
+    start  = _time_to_slot(time_part)               # ✅ 10-min slots
+    length = LAB_LENGTH if is_lab else LEC_LENGTH    # ✅ 18 or 5
     return format_time(start, length)
 
 
 def slots_occupied_by(ts: str, is_lab: bool) -> set:
     """
-    Return a set of (day_short, slot_idx) tuples that this assignment occupies.
+    Return set of (day_short, slot_idx) tuples this assignment occupies.
     Used by detect_clashes and try_move.
     """
     day_shorts, time_part = parse_timeslot(ts)
-    h, m   = map(int, time_part.split(":"))
-    start  = (h - 8) * 2 + (1 if m == 30 else 0)
-    length = 6 if is_lab else 2
+    start  = _time_to_slot(time_part)               # ✅ 10-min slots
+    length = LAB_LENGTH if is_lab else LEC_LENGTH    # ✅ 18 or 5
     occupied = set()
     for d in day_shorts:
         for s in range(start, start + length):
@@ -115,7 +120,7 @@ def build_ga_data(df: pd.DataFrame) -> dict:
     # Subjects
     subjects = {}
     for idx, row in df.iterrows():
-        grp_id       = group_name_to_id[row["group"]]
+        grp_id        = group_name_to_id[row["group"]]
         teacher_names = [n.strip() for n in str(row["teacher"]).split(",")]
         inst_ids      = [teacher_name_to_id[n] for n in teacher_names if n in teacher_name_to_id]
 
@@ -140,49 +145,87 @@ def build_ga_data(df: pd.DataFrame) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════
-# GA RUNNER  (replaces run_generator / TimeTableCreater)
+# GA RUNNER
 # ═══════════════════════════════════════════════════════════════
 
 def run_ga(df: pd.DataFrame) -> dict:
     """
-    Run the GA on df and return:
-        {success, scheduled, unplaced_count}
-
-    Each 'scheduled' item:
-        {course, teacher, group, timeslot, room, is_lab, students}
+    Run the GA and return {success, scheduled, unplaced_count}.
+    Each scheduled item: {course, teacher, group, timeslot, room, is_lab, students}
     """
     data = build_ga_data(df)
     ga   = GeneticAlgorithm(data)
     best = ga.run()
 
-    rooms      = data["rooms"]
-    sections   = data["sections"]
-    subjects   = data["subjects"]
+    rooms       = data["rooms"]
+    sections    = data["sections"]
+    subjects    = data["subjects"]
     instructors = data["instructors"]
 
     scheduled = []
+
+    # ── DEBUG: length check (matches __main__) ────────────────
+    print("\n===== DEBUG LENGTH CHECK =====")
+
     for s_id, s in best.data["sections"].items():
         for sub_id, d in s["details"].items():
             r_id, inst_id, days, start, length = d
+            print("DEBUG →", subjects[sub_id][0], "| Length:", length)
 
-            # Resolve teacher name from instructor id
             teacher_name = instructors[inst_id][0] if inst_id is not None else "TBA"
-
             scheduled.append({
                 "course":   subjects[sub_id][0],
                 "teacher":  teacher_name,
                 "group":    sections[s_id][0],
-                "timeslot": timeslot_str(days, start, length),
+                "timeslot": timeslot_str(days, start, length),   # ✅ fixed
                 "room":     rooms[r_id][0],
                 "is_lab":   subjects[sub_id][6] == "lab",
                 "students": subjects[sub_id][7],
             })
 
     unplaced = sum(len(v) for v in best.data["unplaced"]["sections"].values())
+    placed   = len(scheduled)
+    total    = placed + unplaced
+
+    # ── Summary ───────────────────────────────────────────────
+    print(f"\n{'='*50}")
+    print(f"Placed  : {placed}")
+    print(f"Unplaced: {unplaced}")
+    print(f"{'='*50}")
+    print(f"\nBreak schedule enforced:")
+    print(f"  Tea break   : 09:50 – 10:30")
+    print(f"  Prayer break: 13:30 – 14:30")
+    print(f"\nSession durations:")
+    print(f"  Lecture : {LEC_LENGTH * SLOT_UNIT} min")
+    print(f"  Lab     : {LAB_LENGTH * SLOT_UNIT} min")
+
+    # ── Schedule detail with course + time ────────────────────
+    print(f"\n{'='*50}")
+    print(
+        f"{'COURSE':<20} {'GROUP':<12} {'TYPE':<8} "
+        f"{'DAYS':<12} {'TIME':<25} {'DURATION':<12} {'ROOM'}"
+    )
+    print(f"{'-'*100}")
+
+    days_map = {0: "Mon", 1: "Tue", 2: "Wed", 3: "Thu", 4: "Fri", 5: "Sat"}
+
+    for s_id, s in best.data["sections"].items():
+        for sub_id, d in s["details"].items():
+            r_id, inst_id, days, start, length = d
+            print(
+                f"{subjects[sub_id][0]:<20} {sections[s_id][0]:<12} "
+                f"{subjects[sub_id][6].upper():<8} "
+                f"{'+'.join(days_map[x] for x in days):<12} "
+                f"{format_time(start, length):<25} "
+                f"{length * SLOT_UNIT} min"
+                f"        {rooms[r_id][0]}"
+            )
+
+    print(f"{'='*50}\n")
 
     return {
-        "success":       True,
-        "scheduled":     scheduled,
+        "success":        True,
+        "scheduled":      scheduled,
         "unplaced_count": unplaced,
     }
 
@@ -194,8 +237,8 @@ def run_ga(df: pd.DataFrame) -> dict:
 def build_df(scheduled: list) -> pd.DataFrame:
     rows = []
     for item in scheduled:
-        ts        = item["timeslot"]
-        is_lab    = item.get("is_lab", False)
+        ts         = item["timeslot"]
+        is_lab     = item.get("is_lab", False)
         day_shorts, _ = parse_timeslot(ts)
         day_display   = " / ".join(DAYS_LONG.get(d, d) for d in day_shorts)
 
@@ -205,7 +248,7 @@ def build_df(scheduled: list) -> pd.DataFrame:
             "Room":     item["room"],
             "Group":    item["group"],
             "Day":      day_display,
-            "Time":     format_timeslot_display(ts, is_lab),
+            "Time":     format_timeslot_display(ts, is_lab),   # ✅ fixed
             "Type":     "LAB" if is_lab else "THEORY",
             "Students": item.get("students", ""),
         })
@@ -255,20 +298,25 @@ def _build_busy_sets(scheduled: list, exclude_course: str = None):
 def try_move(item_to_move: dict, all_scheduled: list) -> tuple:
     """
     Try every (days_pattern, start_slot, room) combination for item_to_move.
+    Uses pre-filtered VALID_*_STARTS to avoid break windows automatically.
     Returns (new_scheduled, True) on success, (None, False) otherwise.
     """
     is_lab   = item_to_move.get("is_lab", False)
-    length   = 6 if is_lab else 2
+    length   = LAB_LENGTH if is_lab else LEC_LENGTH          # ✅ 18 or 5
     patterns = LAB_DAY_PATTERNS if is_lab else LEC_DAY_PATTERNS
+    starts   = VALID_LAB_STARTS if is_lab else VALID_LEC_STARTS  # ✅ break-safe
 
     teacher_busy, group_busy, room_busy = _build_busy_sets(
         all_scheduled, exclude_course=item_to_move["course"]
     )
 
-    rooms_list = [r["name"] for r in GIKI_ROOMS if r["type"] == ("lab" if is_lab else "lec")]
+    rooms_list = [
+        r["name"] for r in GIKI_ROOMS
+        if r["type"] == ("lab" if is_lab else "lec")
+    ]
 
     for days in patterns:
-        for start in range(MAX_SLOTS - length + 1):
+        for start in starts:                                  # ✅ pre-filtered starts
             candidate_ts = timeslot_str(days, start, length)
             if candidate_ts == item_to_move["timeslot"]:
                 continue
@@ -357,10 +405,6 @@ with tab1:
     if st.button("Validate & Generate", type="primary", use_container_width=True):
         result = validate_courses_df(edited_df)
 
-        # if result.warnings:
-        #     for w in result.warnings:
-        #         st.warning(w, icon="⚠️")
-
         if not result.is_valid:
             st.error(
                 f"**{len(result.errors)} validation error(s) found. Fix these before generating:**",
@@ -396,13 +440,6 @@ with tab1:
 
             if unplaced == 0 and clashes == 0:
                 st.success(f"All {total} courses scheduled with no clashes! 🎉", icon="✅")
-            # elif clashes == 0:
-            #     # st.warning(
-            #     #     f"Scheduled **{placed}/{total}** courses. "
-            #     #     f"**{unplaced}** could not be placed (likely a group has >18 courses/week — "
-            #     #     "split into sub-batches to fix).",
-            #     #     icon="⚠️",
-            #     # )
             else:
                 st.warning(
                     f"Scheduled {placed}/{total} courses with **{clashes} clash(es)**. "
@@ -434,19 +471,19 @@ with tab2:
         st.subheader("Export Options")
         dl1, dl2 = st.columns(2)
 
-        with dl1:
-            with st.spinner("Preparing PDF…"):
-                try:
-                    pdf_bytes = export_grid_pdf(result["scheduled"])
-                    st.download_button(
-                        label="📄 Download PDF (Poster Layout)",
-                        data=pdf_bytes,
-                        file_name=f"GIKI_Timetable_{datetime.now().strftime('%Y%m%d')}.pdf",
-                        mime="application/pdf",
-                        use_container_width=True,
-                    )
-                except Exception as e:
-                    st.error(f"PDF error: {e}")
+        # with dl1:
+        #     with st.spinner("Preparing PDF…"):
+        #         try:
+        #             # pdf_bytes = export_grid_pdf(result["scheduled"])
+        #             st.download_button(
+        #                 label="📄 Download PDF (Poster Layout)",
+        #                 data=pdf_bytes,
+        #                 file_name=f"GIKI_Timetable_{datetime.now().strftime('%Y%m%d')}.pdf",
+        #                 mime="application/pdf",
+        #                 use_container_width=True,
+        #             )
+        #         except Exception as e:
+        #             st.error(f"PDF error: {e}")
 
         with dl2:
             csv_data = res_df.to_csv(index=False).encode("utf-8")
@@ -510,11 +547,11 @@ with tab3:
                     st.info("Searching for a conflict-free slot…")
 
                     new_sched, ok = try_move(junior_item, scheduled)
-                    moved_label = "Junior"
+                    moved_label   = "Junior"
 
                     if not ok:
                         new_sched, ok = try_move(senior_item, scheduled)
-                        moved_label = "Senior"
+                        moved_label   = "Senior"
 
                     if ok:
                         st.success(f"✅ Resolved! Moved {moved_label} course to a new slot.")
