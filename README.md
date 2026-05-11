@@ -161,9 +161,9 @@ soft_score      =  Σ capacity_reward(course)
 ### Evolutionary Loop
 
 ```
-Initialize population (30 chromosomes)
+Initialize population (15 chromosomes)
 │
-└── For each generation (50 total):
+└── For each generation (30 total):
       1. Evaluate fitness for every chromosome
       2. Sort population by fitness (descending)
       3. Elitism  →  keep top 5 unchanged
@@ -228,7 +228,7 @@ Return best chromosome
 | Courses placed | 163 / 181 **(90%)** |
 | Hard constraint violations | **0** |
 | Generations to converge | ~30 – 40 |
-| Runtime | ~35 seconds |
+| Runtime | 1 minute and 45 seconds |
 
 > The 18 unplaced courses belong to a single batch that exceeds the maximum schedulable courses per week — a data-level infeasibility, not an algorithm failure.
 
